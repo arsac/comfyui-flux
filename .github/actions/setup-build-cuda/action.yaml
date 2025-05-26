@@ -1,0 +1,43 @@
+name: Set up Runner for build
+
+inputs:
+  python:
+    description: Python version to install
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - id: cuda_info
+      shell: bash
+      run: |
+        echo "CUDA_INSTALL_SCRIPT=https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_575.51.03_linux.run" >> $GITHUB_OUTPUT
+        echo "CUDA_VERSION_SUFFIX=cu" >> $GITHUB_OUTPUT
+
+    - shell: bash
+      run: |
+        # Use GCC13 for cu126+
+        yum list installed
+        yum install gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ gcc-toolset-13-libstdc++-devel wget git -y
+        echo "source /opt/rh/gcc-toolset-13/enable" >> ~/.profile
+
+    - shell: bash -l {0}
+      run: |
+        yum list installed
+        yum install wget git -y
+        which g++
+        g++ --version
+
+    - name: (Linux) install cuda
+      shell: bash -l {0}
+      run: >
+        # Install CUDA
+        echo "Installing CUDA from ${{ steps.cuda_info.outputs.CUDA_INSTALL_SCRIPT }}"
+        wget -q "${{ steps.cuda_info.outputs.CUDA_INSTALL_SCRIPT }}" -O cuda.run &&
+        sh ./cuda.run --toolkit &&
+        rm ./cuda.run
+
+    # host compiler is too new for cuda 12.1 :(
+    - run: echo "NVCC_FLAGS=-allow-unsupported-compiler" >> $GITHUB_ENV
+      shell: bash

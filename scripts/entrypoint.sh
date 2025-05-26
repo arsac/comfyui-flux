@@ -1,114 +1,67 @@
 #!/bin/bash
-
 set -e
 
-# Ensure correct permissions for /app directory
-if [ ! -w "/app" ]; then
-    echo "Warning: Cannot write to /app. Attempting to fix permissions..."
-    sudo chown -R $(id -u):$(id -g) /app
-fi
-
-# Install or update ComfyUI
-cd /app
-if [ ! -d "/app/ComfyUI" ]; then
-    echo "ComfyUI not found. Installing..."
-    chmod +x /scripts/install_comfyui.sh
-    bash /scripts/install_comfyui.sh
-else
-    echo "Updating ComfyUI..."
-    cd /app/ComfyUI
-    git fetch origin master
-    git reset --hard origin/master
-    pip install -r requirements.txt
-    echo "Updating ComfyUI-Manager..."
-    cd /app/ComfyUI/custom_nodes/ComfyUI-Manager
-    git fetch origin main
-    git reset --hard origin/main
-    pip install -r requirements.txt
-    cd /app
-fi
-
-# Determine model list file based on LOW_VRAM
-if [ "$LOW_VRAM" == "true" ]; then
-    echo "[INFO] LOW_VRAM is set to true. Downloading FP8 models..."
-    MODEL_LIST_FILE="/scripts/models_fp8.txt"
-else
-    echo "[INFO] LOW_VRAM is not set or false. Downloading non-FP8 models..."
-    MODEL_LIST_FILE="/scripts/models.txt"
-fi
-
-# Create temporary file for model list
-TEMP_MODEL_LIST=$(mktemp)
-
-# Filter models based on MODELS_DOWNLOAD if set
-if [ -n "${MODELS_DOWNLOAD}" ]; then
-    echo "[INFO] Filtering models based on MODELS_DOWNLOAD=${MODELS_DOWNLOAD}"
-
-    # Convert to lowercase for case-insensitive matching
-    MODELS_DOWNLOAD_LC=$(echo "$MODELS_DOWNLOAD" | tr '[:upper:]' '[:lower:]')
-
-    if [ "$LOW_VRAM" == "true" ]; then
-        # For FP8 models, only copy the specified model sections
-        if [[ "$MODELS_DOWNLOAD_LC" == *"schnell"* ]]; then
-            sed -n '/# FLUX.1\[schnell\] FP8/,/^$/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-        fi
-        if [[ "$MODELS_DOWNLOAD_LC" == *"dev"* ]]; then
-            sed -n '/# FLUX.1\[dev\] FP8/,/^$/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-        fi
-    else
-        # For full models, copy dependencies first
-        sed -n '/# Flux Text Encoders/,/# VAE/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-        sed -n '/# Loras/,/^$/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-
-        # Then add requested models and their VAE
-        if [[ "$MODELS_DOWNLOAD_LC" == *"schnell"* ]]; then
-            sed -n '/# FLUX.1\[schnell\] UNet/,/^$/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-            sed -n '/# VAE/,/# Loras/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-        fi
-        if [[ "$MODELS_DOWNLOAD_LC" == *"dev"* ]]; then
-            sed -n '/# FLUX.1\[dev\] UNet/,/^$/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-            sed -n '/# VAE/,/# Loras/p' "$MODEL_LIST_FILE" >> "$TEMP_MODEL_LIST"
-        fi
-    fi
-
-    # If the temp file is empty (invalid MODELS_DOWNLOAD value), use the full list
-    if [ ! -s "$TEMP_MODEL_LIST" ]; then
-        echo "[WARN] No models matched MODELS_DOWNLOAD value. Using complete model list."
-        cp "$MODEL_LIST_FILE" "$TEMP_MODEL_LIST"
-    fi
-else
-    # If MODELS_DOWNLOAD not set, use the complete list
-    cp "$MODEL_LIST_FILE" "$TEMP_MODEL_LIST"
-fi
-
-# Download models
 echo "########################################"
 echo "[INFO] Downloading models..."
 echo "########################################"
 
-if [ -z "${HF_TOKEN}" ]; then
-    echo "[WARN] HF_TOKEN not provided. Skipping models that require authentication..."
-    sed '/# Requires HF_TOKEN/,/^$/d' "$TEMP_MODEL_LIST" > /scripts/models_filtered.txt
-    DOWNLOAD_LIST_FILE="/scripts/models_filtered.txt"
-else
-    DOWNLOAD_LIST_FILE="$TEMP_MODEL_LIST"
+# Function to download model if it doesn't exist
+download_model() {
+    local url="$1"
+    local path="$2"
+    local name="$3"
+    
+    if [ ! -f "${COMFY_HOME}/${path}" ]; then
+        echo "Downloading ${name}..."
+        comfy --workspace "${COMFY_HOME}" model download --url "${url}" --relative-path "${path}" --token "${HF_TOKEN}"
+    else
+        echo "${name} already exists, skipping download"
+    fi
+}
+
+# Download essential models based on environment variables
+if [ "${DOWNLOAD_FLUX}" = "true" ]; then
+    download_model "https://huggingface.co/black-forest-labs/FLUX.1-schnell" \
+                   "models/unet/flux1-schnell.safetensors" \
+                   "FLUX.1 Schnell"
 fi
 
-aria2c --input-file="$DOWNLOAD_LIST_FILE" \
-    --allow-overwrite=false --auto-file-renaming=false --continue=true \
-    --max-connection-per-server=5 --conditional-get=true \
-    ${HF_TOKEN:+--header="Authorization: Bearer ${HF_TOKEN}"}
+if [ "${DOWNLOAD_SD15}" = "true" ]; then
+    download_model "https://huggingface.co/runwayml/stable-diffusion-v1-5" \
+                   "models/checkpoints/sd15.safetensors" \
+                   "Stable Diffusion 1.5"
+fi
 
-# Cleanup
-rm -f "$TEMP_MODEL_LIST"
+if [ "${DOWNLOAD_CLIP}" = "true" ]; then
+    download_model "https://huggingface.co/openai/clip-vit-large-patch14" \
+                   "models/clip/clip-vit-large-patch14.safetensors" \
+                   "CLIP ViT Large"
+fi
+
+# Download custom models from environment variable
+if [ -n "${CUSTOM_MODELS}" ]; then
+    echo "Downloading custom models: ${CUSTOM_MODELS}"
+    IFS=',' read -ra MODELS <<< "${CUSTOM_MODELS}"
+    for model_url in "${MODELS[@]}"; do
+        echo "Downloading ${model_url}..."
+        comfy --workspace "${COMFY_HOME}" model download --url "${model_url}" --token "${HF_TOKEN}"
+    done
+fi
+
+# Download models from a file if it exists
+if [ -f "/app/models.txt" ]; then
+    echo "Found models.txt, downloading listed models..."
+    while IFS= read -r line; do
+        if [ -n "$line" ] && [[ ! "$line" =~ ^# ]]; then
+            echo "Downloading ${line}..."
+            comfy --workspace "${COMFY_HOME}" model download --url "${line}" --token "${HF_TOKEN}"
+        fi
+    done < "/app/models.txt"
+fi
 
 echo "########################################"
 echo "[INFO] Starting ComfyUI..."
 echo "########################################"
 
-export PATH="${PATH}:/app/.local/bin"
-export PYTHONPYCACHEPREFIX="/app/.cache/pycache"
-
-cd /app
-
-python3 ./ComfyUI/main.py --listen --port 8188 ${CLI_ARGS}
+# Start ComfyUI with any additional arguments
+exec comfy --workspace "${COMFY_HOME}" launch -- --listen "0.0.0.0" --port "8188" "$@"

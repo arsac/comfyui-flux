@@ -1,0 +1,103 @@
+name: Build xformers wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      xformers_ref:
+        description: "xformers git reference"
+        required: true
+        default: "v0.0.30"
+      cuda_version:
+        description: "CUDA version"
+        required: true
+        default: "12.9.0"
+  schedule:
+    # Build weekly on Sundays
+    - cron: "0 2 * * 0"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/xformers-builder
+
+jobs:
+  build-wheels:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Runner
+        uses: ./.github/actions/setup-build-cuda
+        with:
+          python: "3.12"
+
+      - name: Download xformers source
+        run: |
+          XFORMERS_REF="${{ github.event.inputs.xformers_ref || 'v0.0.30' }}"
+          git clone --depth 1 --branch ${XFORMERS_REF} --recursive https://github.com/facebookresearch/xformers.git
+
+      - name: Setup Python environment
+        run: |
+          cd xformers
+          python3 -m venv venv
+          . ./venv/bin/activate
+          echo "VIRTUAL_ENV=$(pwd)/venv" >> $GITHUB_ENV
+          echo "$(pwd)/venv/bin" >> $GITHUB_PATH
+          pip install packaging ninja wheel setuptools
+
+      - name: Install PyTorch
+        run: |
+          cd xformers
+          pip install wheel -r requirements.txt --extra-index-url https://download.pytorch.org/whl/nightly/cu128
+
+      - name: Build wheel
+        run: |
+          cd xformers
+          python setup.py bdist_wheel -d dist/ -k --plat-name manylinux_2_28_x86_64
+
+      - name: Get wheel info
+        id: wheel_info
+        run: |
+          WHEEL_FILE=$(ls xformers/dist/*.whl | head -1)
+          WHEEL_NAME=$(basename "$WHEEL_FILE")
+          echo "wheel_file=$WHEEL_FILE" >> $GITHUB_OUTPUT
+          echo "wheel_name=$WHEEL_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xformers-wheel-py${{ matrix.python-version }}
+          path: xformers/dist/*.whl
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: xformers-${{ github.event.inputs.xformers_ref || 'v0.0.30' }}-cuda${{ github.event.inputs.cuda_version || '12.9.0' }}
+          name: xformers ${{ github.event.inputs.xformers_ref || 'v0.0.30' }} (CUDA ${{ github.event.inputs.cuda_version || '12.9.0' }})
+          body: |
+            ## xformers Wheel Release
+
+            **xformers version:** ${{ github.event.inputs.xformers_ref || 'v0.0.30' }}
+            **CUDA version:** ${{ github.event.inputs.cuda_version || '12.9.0' }}
+            **Python version:** ${{ matrix.python-version }}
+            **Platform:** manylinux_2_28_x86_64
+
+            ### Installation
+            ```bash
+            pip install ${{ steps.wheel_info.outputs.wheel_name }}
+            ```
+          files: ${{ steps.wheel_info.outputs.wheel_file }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

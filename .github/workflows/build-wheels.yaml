@@ -22,15 +22,12 @@ env:
 jobs:
   build-wheels:
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux_2_28_x86_64
-
-    strategy:
-      matrix:
-        python-version: ["3.12"]
 
     permissions:
       contents: write
       packages: write
+    env:
+      TORCH_CUDA_ARCH_LIST: "12.0"
 
     steps:
       - name: Checkout
@@ -53,17 +50,17 @@ jobs:
           . ./venv/bin/activate
           echo "VIRTUAL_ENV=$(pwd)/venv" >> $GITHUB_ENV
           echo "$(pwd)/venv/bin" >> $GITHUB_PATH
-          pip install packaging ninja wheel setuptools
+          uv pip install packaging ninja wheel setuptools
 
       - name: Install PyTorch
         run: |
           cd xformers
-          pip install wheel -r requirements.txt --extra-index-url https://download.pytorch.org/whl/nightly/cu128
+          uv pip install wheel -r requirements.txt --extra-index-url https://download.pytorch.org/whl/nightly/cu128
 
       - name: Build wheel
         run: |
           cd xformers
-          python setup.py bdist_wheel -d dist/ -k --plat-name manylinux_2_28_x86_64
+          uv build --wheel --no-build-isolation -o dist
 
       - name: Get wheel info
         id: wheel_info
@@ -76,7 +73,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xformers-wheel-py${{ matrix.python-version }}
+          name: xformers-wheel-py3.12
           path: xformers/dist/*.whl
 
       - name: Create Release
@@ -89,8 +86,7 @@ jobs:
 
             **xformers version:** ${{ github.event.inputs.xformers_ref || 'v0.0.30' }}
             **CUDA version:** ${{ github.event.inputs.cuda_version || '12.9.0' }}
-            **Python version:** ${{ matrix.python-version }}
-            **Platform:** manylinux_2_28_x86_64
+            **Python version:** 3.12
 
             ### Installation
             ```bash
